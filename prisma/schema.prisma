@@ -1,0 +1,851 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// -----------------------------------------------------------------------------
+// Identity and access
+// -----------------------------------------------------------------------------
+
+enum UserRole {
+  CLIENT
+  MODERATOR
+  ADMIN
+}
+
+enum UserStatus {
+  PENDING_ACTIVATION
+  ACTIVE
+  SUSPENDED
+  DISABLED
+}
+
+model User {
+  id                  String     @id @default(uuid()) @db.Uuid
+  email               String     @unique @db.VarChar(320)
+  emailVerified       DateTime?  @db.Timestamptz(3)
+  name                String?    @db.VarChar(160)
+  image               String?    @db.Text
+  phoneE164           String?    @unique @db.VarChar(20)
+  role                UserRole   @default(CLIENT)
+  status              UserStatus @default(PENDING_ACTIVATION)
+  locale              String     @default("es-PE") @db.VarChar(16)
+  displayCurrencyCode String     @default("PEN") @db.VarChar(3)
+  countryCode         String?    @db.Char(2)
+  lastLoginAt         DateTime?  @db.Timestamptz(3)
+  createdAt           DateTime   @default(now()) @db.Timestamptz(3)
+  updatedAt           DateTime   @updatedAt @db.Timestamptz(3)
+
+  displayCurrency      Currency                   @relation(fields: [displayCurrencyCode], references: [code], onUpdate: Cascade, onDelete: Restrict)
+  country              Country?                   @relation(fields: [countryCode], references: [code], onUpdate: Cascade, onDelete: SetNull)
+  accounts             Account[]
+  sessions             Session[]
+  passwordCredential   PasswordCredential?
+  passwordResetTokens  PasswordResetToken[]
+  wallet               Wallet?
+  orders               Order[]
+  paymentSubmissions   PaymentSubmission[]        @relation("PaymentSubmitter")
+  reviewedPayments     PaymentSubmission[]        @relation("PaymentReviewer")
+  ledgerTransactions   LedgerTransaction[]        @relation("LedgerTransactionCreator")
+  createdFxRates       FxRate[]                   @relation("FxRateCreator")
+  assignedFulfillments Fulfillment[]              @relation("FulfillmentAssignee")
+  fulfillmentAttempts  FulfillmentAttempt[]       @relation("FulfillmentAttemptActor")
+  activationWorkflows  AccountActivation[]        @relation("ActivationSubject")
+  performedActivations AccountActivation[]        @relation("ActivationPerformer")
+  activationAttempts   AccountActivationAttempt[] @relation("ActivationAttemptActor")
+  auditLogs            AuditLog[]                 @relation("AuditActor")
+
+  @@index([role, status])
+  @@index([countryCode])
+}
+
+// Auth.js adapter-compatible models.
+model Account {
+  id                String  @id @default(uuid()) @db.Uuid
+  userId            String  @db.Uuid
+  type              String  @db.VarChar(32)
+  provider          String  @db.VarChar(64)
+  providerAccountId String  @db.VarChar(255)
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String? @db.VarChar(64)
+  scope             String? @db.Text
+  id_token          String? @db.Text
+  session_state     String? @db.Text
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+model Session {
+  id           String   @id @default(uuid()) @db.Uuid
+  sessionToken String   @unique @db.VarChar(255)
+  userId       String   @db.Uuid
+  expires      DateTime @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model PasswordCredential {
+  userId            String    @id @db.Uuid
+  passwordHash      String    @db.Text
+  failedAttempts    Int       @default(0)
+  lockedUntil       DateTime? @db.Timestamptz(3)
+  passwordChangedAt DateTime  @default(now()) @db.Timestamptz(3)
+  createdAt         DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt         DateTime  @updatedAt @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model PasswordResetToken {
+  id          String    @id @default(uuid()) @db.Uuid
+  userId      String    @db.Uuid
+  tokenHash   String    @unique @db.VarChar(128)
+  requestedIp String?   @db.VarChar(64)
+  expiresAt   DateTime  @db.Timestamptz(3)
+  consumedAt  DateTime? @db.Timestamptz(3)
+  createdAt   DateTime  @default(now()) @db.Timestamptz(3)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model VerificationToken {
+  identifier String   @db.VarChar(320)
+  token      String   @unique @db.VarChar(255)
+  expires    DateTime @db.Timestamptz(3)
+
+  @@unique([identifier, token])
+}
+
+// -----------------------------------------------------------------------------
+// Account activation
+// -----------------------------------------------------------------------------
+
+enum ActivationExecutionMode {
+  MANUAL
+  API_AUTOMATIC
+}
+
+enum AccountActivationStatus {
+  PENDING
+  IN_PROGRESS
+  ACTIVATED
+  REJECTED
+  EXPIRED
+  CANCELLED
+}
+
+enum ActivationAttemptTrigger {
+  MANUAL
+  API_REQUEST
+  WEBHOOK
+  BOT
+  RETRY
+}
+
+enum ActivationAttemptStatus {
+  STARTED
+  SUCCEEDED
+  FAILED
+}
+
+enum ActivationActorType {
+  HUMAN
+  SYSTEM
+  PROVIDER
+  BOT
+}
+
+model ActivationProvider {
+  code             String   @id @db.VarChar(50)
+  name             String   @db.VarChar(100)
+  kind             String   @db.VarChar(32)
+  configurationKey String?  @db.VarChar(255)
+  isActive         Boolean  @default(true)
+  createdAt        DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt        DateTime @updatedAt @db.Timestamptz(3)
+
+  methods     ActivationMethod[]
+  activations AccountActivation[]
+  attempts    AccountActivationAttempt[]
+}
+
+model ActivationMethod {
+  code                String                  @id @db.VarChar(50)
+  name                String                  @db.VarChar(100)
+  executionMode       ActivationExecutionMode
+  providerCode        String                  @db.VarChar(50)
+  publicConfiguration Json?
+  isActive            Boolean                 @default(true)
+  createdAt           DateTime                @default(now()) @db.Timestamptz(3)
+  updatedAt           DateTime                @updatedAt @db.Timestamptz(3)
+
+  provider    ActivationProvider  @relation(fields: [providerCode], references: [code], onUpdate: Cascade, onDelete: Restrict)
+  activations AccountActivation[]
+
+  @@index([providerCode, isActive])
+}
+
+model AccountActivation {
+  id                    String                  @id @default(uuid()) @db.Uuid
+  userId                String                  @db.Uuid
+  methodCode            String                  @db.VarChar(50)
+  providerCode          String                  @db.VarChar(50)
+  executionModeSnapshot ActivationExecutionMode
+  status                AccountActivationStatus @default(PENDING)
+  idempotencyKey        String                  @unique @db.VarChar(180)
+  providerReference     String?                 @db.VarChar(255)
+  activatedActorType    ActivationActorType?
+  activatedByUserId     String?                 @db.Uuid
+  activatedAt           DateTime?               @db.Timestamptz(3)
+  rejectionReason       String?                 @db.Text
+  expiresAt             DateTime?               @db.Timestamptz(3)
+  version               Int                     @default(0)
+  createdAt             DateTime                @default(now()) @db.Timestamptz(3)
+  updatedAt             DateTime                @updatedAt @db.Timestamptz(3)
+
+  user        User                       @relation("ActivationSubject", fields: [userId], references: [id], onDelete: Restrict)
+  method      ActivationMethod           @relation(fields: [methodCode], references: [code], onUpdate: Cascade, onDelete: Restrict)
+  provider    ActivationProvider         @relation(fields: [providerCode], references: [code], onUpdate: Cascade, onDelete: Restrict)
+  activatedBy User?                      @relation("ActivationPerformer", fields: [activatedByUserId], references: [id], onDelete: SetNull)
+  attempts    AccountActivationAttempt[]
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([status, createdAt])
+  @@index([providerCode, providerReference])
+}
+
+model AccountActivationAttempt {
+  id                  String                   @id @default(uuid()) @db.Uuid
+  accountActivationId String                   @db.Uuid
+  attemptNumber       Int
+  trigger             ActivationAttemptTrigger
+  status              ActivationAttemptStatus  @default(STARTED)
+  actorType           ActivationActorType
+  actorUserId         String?                  @db.Uuid
+  providerCode        String                   @db.VarChar(50)
+  externalRequestId   String?                  @db.VarChar(255)
+  idempotencyKey      String                   @unique @db.VarChar(180)
+  requestMetadata     Json?
+  responseMetadata    Json?
+  errorCode           String?                  @db.VarChar(120)
+  errorMessage        String?                  @db.Text
+  startedAt           DateTime                 @default(now()) @db.Timestamptz(3)
+  completedAt         DateTime?                @db.Timestamptz(3)
+
+  accountActivation AccountActivation  @relation(fields: [accountActivationId], references: [id], onDelete: Restrict)
+  actor             User?              @relation("ActivationAttemptActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+  provider          ActivationProvider @relation(fields: [providerCode], references: [code], onUpdate: Cascade, onDelete: Restrict)
+
+  @@unique([accountActivationId, attemptNumber])
+  @@unique([providerCode, externalRequestId])
+  @@index([status, startedAt])
+}
+
+// -----------------------------------------------------------------------------
+// Reference data
+// -----------------------------------------------------------------------------
+
+model Currency {
+  code       String   @id @db.VarChar(3)
+  name       String   @db.VarChar(80)
+  symbol     String   @db.VarChar(12)
+  minorUnits Int      @default(2)
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt  DateTime @updatedAt @db.Timestamptz(3)
+
+  countries               Country[]
+  users                   User[]
+  wallets                 Wallet[]
+  ledgerAccounts          LedgerAccount[]
+  ordersAsBaseCurrency    Order[]             @relation("OrderBaseCurrency")
+  ordersAsDisplayCurrency Order[]             @relation("OrderDisplayCurrency")
+  fxRatesAsBase           FxRate[]            @relation("FxBaseCurrency")
+  fxRatesAsQuote          FxRate[]            @relation("FxQuoteCurrency")
+  paymentSubmissions      PaymentSubmission[]
+}
+
+model Country {
+  code                String   @id @db.Char(2)
+  name                String   @db.VarChar(100)
+  defaultCurrencyCode String   @db.VarChar(3)
+  isActive            Boolean  @default(true)
+  createdAt           DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt           DateTime @updatedAt @db.Timestamptz(3)
+
+  defaultCurrency Currency               @relation(fields: [defaultCurrencyCode], references: [code], onUpdate: Cascade, onDelete: Restrict)
+  users           User[]
+  orders          Order[]
+  paymentMethods  PaymentMethodCountry[]
+
+  @@index([defaultCurrencyCode])
+}
+
+enum PaymentMethodKind {
+  MANUAL
+  BANK_TRANSFER
+  CARD
+  CRYPTO
+  DIGITAL_WALLET
+}
+
+model PaymentMethod {
+  // Stable business key, e.g. WHATSAPP_MANUAL, STRIPE, or CRYPTO.
+  code                String            @id @db.VarChar(50)
+  name                String            @db.VarChar(100)
+  kind                PaymentMethodKind
+  instructions        String?           @db.Text
+  publicConfiguration Json?
+  requiresProof       Boolean           @default(false)
+  supportsAutomation  Boolean           @default(false)
+  sortOrder           Int               @default(0)
+  isActive            Boolean           @default(true)
+  createdAt           DateTime          @default(now()) @db.Timestamptz(3)
+  updatedAt           DateTime          @updatedAt @db.Timestamptz(3)
+
+  countries          PaymentMethodCountry[]
+  orders             Order[]
+  paymentSubmissions PaymentSubmission[]
+}
+
+model PaymentMethodCountry {
+  paymentMethodCode String  @db.VarChar(50)
+  countryCode       String  @db.Char(2)
+  isActive          Boolean @default(true)
+
+  paymentMethod PaymentMethod @relation(fields: [paymentMethodCode], references: [code], onUpdate: Cascade, onDelete: Cascade)
+  country       Country       @relation(fields: [countryCode], references: [code], onUpdate: Cascade, onDelete: Cascade)
+
+  @@id([paymentMethodCode, countryCode])
+  @@index([countryCode, isActive])
+}
+
+enum FxRateSourceKind {
+  MANUAL
+  API
+}
+
+model FxRate {
+  id                String           @id @default(uuid()) @db.Uuid
+  baseCurrencyCode  String           @db.VarChar(3)
+  quoteCurrencyCode String           @db.VarChar(3)
+  rate              Decimal          @db.Decimal(20, 8)
+  sourceKind        FxRateSourceKind @default(MANUAL)
+  source            String           @db.VarChar(80)
+  externalReference String?          @db.VarChar(255)
+  effectiveAt       DateTime         @db.Timestamptz(3)
+  expiresAt         DateTime?        @db.Timestamptz(3)
+  createdByUserId   String?          @db.Uuid
+  createdAt         DateTime         @default(now()) @db.Timestamptz(3)
+
+  baseCurrency       Currency            @relation("FxBaseCurrency", fields: [baseCurrencyCode], references: [code], onUpdate: Cascade, onDelete: Restrict)
+  quoteCurrency      Currency            @relation("FxQuoteCurrency", fields: [quoteCurrencyCode], references: [code], onUpdate: Cascade, onDelete: Restrict)
+  createdBy          User?               @relation("FxRateCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  orders             Order[]
+  paymentSubmissions PaymentSubmission[]
+
+  @@unique([baseCurrencyCode, quoteCurrencyCode, source, effectiveAt])
+  @@index([baseCurrencyCode, quoteCurrencyCode, effectiveAt(sort: Desc)])
+  @@index([expiresAt])
+}
+
+// -----------------------------------------------------------------------------
+// Catalog
+// -----------------------------------------------------------------------------
+
+enum ServiceStatus {
+  DRAFT
+  ACTIVE
+  INACTIVE
+  ARCHIVED
+}
+
+enum FulfillmentStrategy {
+  MANUAL
+  API_AUTOMATIC
+}
+
+enum ProviderKind {
+  MANUAL
+  API
+}
+
+model ServiceCategory {
+  id          String   @id @default(uuid()) @db.Uuid
+  name        String   @db.VarChar(100)
+  slug        String   @unique @db.VarChar(120)
+  description String?  @db.Text
+  sortOrder   Int      @default(0)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime @updatedAt @db.Timestamptz(3)
+
+  services Service[]
+
+  @@index([isActive, sortOrder])
+}
+
+model Service {
+  id               String        @id @default(uuid()) @db.Uuid
+  categoryId       String        @db.Uuid
+  name             String        @db.VarChar(140)
+  slug             String        @unique @db.VarChar(160)
+  shortDescription String?       @db.VarChar(280)
+  description      String?       @db.Text
+  imageKey         String?       @db.VarChar(500)
+  status           ServiceStatus @default(DRAFT)
+  isFeatured       Boolean       @default(false)
+  sortOrder        Int           @default(0)
+  createdAt        DateTime      @default(now()) @db.Timestamptz(3)
+  updatedAt        DateTime      @updatedAt @db.Timestamptz(3)
+
+  category   ServiceCategory @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  offers     ServiceOffer[]
+  orderItems OrderItem[]
+
+  @@index([categoryId, status, sortOrder])
+  @@index([isFeatured, status])
+}
+
+model FulfillmentProvider {
+  code             String       @id @db.VarChar(50)
+  name             String       @db.VarChar(100)
+  kind             ProviderKind
+  configurationKey String?      @db.VarChar(255)
+  isActive         Boolean      @default(true)
+  createdAt        DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt        DateTime     @updatedAt @db.Timestamptz(3)
+
+  offers       ServiceOffer[]
+  fulfillments Fulfillment[]
+}
+
+model ServiceOffer {
+  id                       String              @id @default(uuid()) @db.Uuid
+  serviceId                String              @db.Uuid
+  providerCode             String?             @db.VarChar(50)
+  name                     String              @db.VarChar(140)
+  sku                      String              @unique @db.VarChar(80)
+  unitPriceUsdCents        BigInt
+  minimumQuantity          Int                 @default(1)
+  maximumQuantity          Int?
+  estimatedDeliveryMinutes Int?
+  fulfillmentStrategy      FulfillmentStrategy @default(MANUAL)
+  customerInputSchema      Json?
+  fulfillmentInstructions  String?             @db.Text
+  isActive                 Boolean             @default(true)
+  sortOrder                Int                 @default(0)
+  createdAt                DateTime            @default(now()) @db.Timestamptz(3)
+  updatedAt                DateTime            @updatedAt @db.Timestamptz(3)
+
+  service    Service              @relation(fields: [serviceId], references: [id], onDelete: Restrict)
+  provider   FulfillmentProvider? @relation(fields: [providerCode], references: [code], onUpdate: Cascade, onDelete: SetNull)
+  orderItems OrderItem[]
+
+  @@index([serviceId, isActive, sortOrder])
+  @@index([providerCode])
+}
+
+// -----------------------------------------------------------------------------
+// Orders and payments
+// -----------------------------------------------------------------------------
+
+enum OrderStatus {
+  DRAFT
+  PLACED
+  PROCESSING
+  COMPLETED
+  CANCELLED
+  EXPIRED
+}
+
+enum OrderPaymentStatus {
+  UNPAID
+  PROOF_SUBMITTED
+  UNDER_REVIEW
+  VERIFIED
+  REJECTED
+  REFUNDED
+}
+
+enum OrderFulfillmentStatus {
+  NOT_STARTED
+  QUEUED
+  IN_PROGRESS
+  PROVISIONED
+  FAILED
+  CANCELLED
+}
+
+model Order {
+  id                     String                 @id @default(uuid()) @db.Uuid
+  orderNumber            String                 @unique @db.VarChar(32)
+  userId                 String                 @db.Uuid
+  countryCode            String                 @db.Char(2)
+  paymentMethodCode      String                 @db.VarChar(50)
+  status                 OrderStatus            @default(DRAFT)
+  paymentStatus          OrderPaymentStatus     @default(UNPAID)
+  fulfillmentStatus      OrderFulfillmentStatus @default(NOT_STARTED)
+  baseCurrencyCode       String                 @default("USD") @db.VarChar(3)
+  displayCurrencyCode    String                 @db.VarChar(3)
+  fxRateId               String?                @db.Uuid
+  fxRateSnapshot         Decimal?               @db.Decimal(20, 8)
+  subtotalUsdCents       BigInt
+  discountUsdCents       BigInt                 @default(0)
+  totalUsdCents          BigInt
+  displayTotalMinor      BigInt
+  whatsappMessageVersion String?                @db.VarChar(32)
+  whatsappOpenedAt       DateTime?              @db.Timestamptz(3)
+  expiresAt              DateTime?              @db.Timestamptz(3)
+  placedAt               DateTime?              @db.Timestamptz(3)
+  completedAt            DateTime?              @db.Timestamptz(3)
+  version                Int                    @default(0)
+  createdAt              DateTime               @default(now()) @db.Timestamptz(3)
+  updatedAt              DateTime               @updatedAt @db.Timestamptz(3)
+
+  user               User                @relation(fields: [userId], references: [id], onDelete: Restrict)
+  country            Country             @relation(fields: [countryCode], references: [code], onUpdate: Cascade, onDelete: Restrict)
+  paymentMethod      PaymentMethod       @relation(fields: [paymentMethodCode], references: [code], onUpdate: Cascade, onDelete: Restrict)
+  baseCurrency       Currency            @relation("OrderBaseCurrency", fields: [baseCurrencyCode], references: [code], onUpdate: Cascade, onDelete: Restrict)
+  displayCurrency    Currency            @relation("OrderDisplayCurrency", fields: [displayCurrencyCode], references: [code], onUpdate: Cascade, onDelete: Restrict)
+  fxRate             FxRate?             @relation(fields: [fxRateId], references: [id], onDelete: SetNull)
+  items              OrderItem[]
+  paymentSubmissions PaymentSubmission[]
+  ledgerTransactions LedgerTransaction[]
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([paymentStatus, createdAt])
+  @@index([fulfillmentStatus, createdAt])
+  @@index([status, expiresAt])
+  @@index([countryCode])
+}
+
+model OrderItem {
+  id                          String              @id @default(uuid()) @db.Uuid
+  orderId                     String              @db.Uuid
+  serviceId                   String              @db.Uuid
+  serviceOfferId              String              @db.Uuid
+  serviceNameSnapshot         String              @db.VarChar(140)
+  offerNameSnapshot           String              @db.VarChar(140)
+  skuSnapshot                 String              @db.VarChar(80)
+  unitPriceUsdCents           BigInt
+  quantity                    Int
+  lineTotalUsdCents           BigInt
+  fulfillmentStrategySnapshot FulfillmentStrategy
+  providerCodeSnapshot        String?             @db.VarChar(50)
+  customerInput               Json?
+  createdAt                   DateTime            @default(now()) @db.Timestamptz(3)
+
+  order        Order        @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  service      Service      @relation(fields: [serviceId], references: [id], onDelete: Restrict)
+  serviceOffer ServiceOffer @relation(fields: [serviceOfferId], references: [id], onDelete: Restrict)
+  fulfillment  Fulfillment?
+
+  @@index([orderId])
+  @@index([serviceId])
+  @@index([serviceOfferId])
+}
+
+enum PaymentSubmissionStatus {
+  SUBMITTED
+  UNDER_REVIEW
+  VERIFIED
+  REJECTED
+  CANCELLED
+}
+
+model PaymentSubmission {
+  id                   String                  @id @default(uuid()) @db.Uuid
+  walletId             String                  @db.Uuid
+  orderId              String?                 @db.Uuid
+  submittedByUserId    String                  @db.Uuid
+  paymentMethodCode    String                  @db.VarChar(50)
+  reportedCurrencyCode String                  @db.VarChar(3)
+  reportedAmountMinor  BigInt
+  normalizedUsdCents   BigInt?
+  fxRateId             String?                 @db.Uuid
+  externalReference    String?                 @db.VarChar(255)
+  clientNote           String?                 @db.Text
+  status               PaymentSubmissionStatus @default(SUBMITTED)
+  reviewedByUserId     String?                 @db.Uuid
+  reviewedAt           DateTime?               @db.Timestamptz(3)
+  rejectionReason      String?                 @db.Text
+  moderatorNotes       String?                 @db.Text
+  createdAt            DateTime                @default(now()) @db.Timestamptz(3)
+  updatedAt            DateTime                @updatedAt @db.Timestamptz(3)
+
+  wallet            Wallet             @relation(fields: [walletId], references: [id], onDelete: Restrict)
+  order             Order?             @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  submittedBy       User               @relation("PaymentSubmitter", fields: [submittedByUserId], references: [id], onDelete: Restrict)
+  paymentMethod     PaymentMethod      @relation(fields: [paymentMethodCode], references: [code], onUpdate: Cascade, onDelete: Restrict)
+  reportedCurrency  Currency           @relation(fields: [reportedCurrencyCode], references: [code], onUpdate: Cascade, onDelete: Restrict)
+  fxRate            FxRate?            @relation(fields: [fxRateId], references: [id], onDelete: SetNull)
+  reviewedBy        User?              @relation("PaymentReviewer", fields: [reviewedByUserId], references: [id], onDelete: SetNull)
+  proofs            PaymentProof[]
+  ledgerTransaction LedgerTransaction?
+
+  @@index([walletId, createdAt(sort: Desc)])
+  @@index([orderId, createdAt(sort: Desc)])
+  @@index([status, createdAt])
+  @@index([reviewedByUserId])
+}
+
+model PaymentProof {
+  id                  String   @id @default(uuid()) @db.Uuid
+  paymentSubmissionId String   @db.Uuid
+  objectKey           String   @unique @db.VarChar(700)
+  originalFileName    String   @db.VarChar(255)
+  mimeType            String   @db.VarChar(120)
+  sizeBytes           BigInt
+  sha256              String   @db.Char(64)
+  createdAt           DateTime @default(now()) @db.Timestamptz(3)
+
+  paymentSubmission PaymentSubmission @relation(fields: [paymentSubmissionId], references: [id], onDelete: Restrict)
+
+  @@index([paymentSubmissionId])
+  @@index([sha256])
+}
+
+// -----------------------------------------------------------------------------
+// Wallet and double-entry ledger
+// -----------------------------------------------------------------------------
+
+enum WalletStatus {
+  ACTIVE
+  FROZEN
+  CLOSED
+}
+
+model Wallet {
+  id                    String       @id @default(uuid()) @db.Uuid
+  userId                String       @unique @db.Uuid
+  currencyCode          String       @default("USD") @db.VarChar(3)
+  status                WalletStatus @default(ACTIVE)
+  availableBalanceCents BigInt       @default(0)
+  pendingBalanceCents   BigInt       @default(0)
+  version               Int          @default(0)
+  lastReconciledAt      DateTime?    @db.Timestamptz(3)
+  createdAt             DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt             DateTime     @updatedAt @db.Timestamptz(3)
+
+  user               User                @relation(fields: [userId], references: [id], onDelete: Restrict)
+  currency           Currency            @relation(fields: [currencyCode], references: [code], onUpdate: Cascade, onDelete: Restrict)
+  accounts           LedgerAccount[]
+  paymentSubmissions PaymentSubmission[]
+}
+
+enum LedgerAccountCategory {
+  ASSET
+  LIABILITY
+  REVENUE
+  EXPENSE
+  EQUITY
+}
+
+enum LedgerAccountPurpose {
+  CLIENT_AVAILABLE
+  CLIENT_PENDING
+  PAYMENT_CLEARING
+  PLATFORM_REVENUE
+  PROMOTION_EXPENSE
+  REFUND_CLEARING
+  SYSTEM_ADJUSTMENT
+}
+
+enum LedgerAccountStatus {
+  ACTIVE
+  FROZEN
+  CLOSED
+}
+
+model LedgerAccount {
+  id           String                @id @default(uuid()) @db.Uuid
+  walletId     String?               @db.Uuid
+  code         String                @unique @db.VarChar(100)
+  name         String                @db.VarChar(140)
+  category     LedgerAccountCategory
+  purpose      LedgerAccountPurpose
+  currencyCode String                @default("USD") @db.VarChar(3)
+  status       LedgerAccountStatus   @default(ACTIVE)
+  createdAt    DateTime              @default(now()) @db.Timestamptz(3)
+  updatedAt    DateTime              @updatedAt @db.Timestamptz(3)
+
+  wallet   Wallet?       @relation(fields: [walletId], references: [id], onDelete: Restrict)
+  currency Currency      @relation(fields: [currencyCode], references: [code], onUpdate: Cascade, onDelete: Restrict)
+  entries  LedgerEntry[]
+
+  @@unique([walletId, purpose])
+  @@index([purpose, status])
+  @@index([currencyCode])
+}
+
+enum LedgerOriginType {
+  DEPOSIT
+  EARNING
+  PROMO_CREDIT
+  REFUND
+  PURCHASE
+  MANUAL_ADJUSTMENT
+  REVERSAL
+}
+
+model LedgerTransaction {
+  id                  String           @id @default(uuid()) @db.Uuid
+  originType          LedgerOriginType
+  idempotencyKey      String           @unique @db.VarChar(180)
+  orderId             String?          @db.Uuid
+  paymentSubmissionId String?          @unique @db.Uuid
+  createdByUserId     String?          @db.Uuid
+  reversalOfId        String?          @unique @db.Uuid
+  referenceType       String?          @db.VarChar(80)
+  referenceId         String?          @db.VarChar(180)
+  description         String?          @db.VarChar(500)
+  metadata            Json?
+  postedAt            DateTime         @default(now()) @db.Timestamptz(3)
+  createdAt           DateTime         @default(now()) @db.Timestamptz(3)
+
+  order             Order?             @relation(fields: [orderId], references: [id], onDelete: Restrict)
+  paymentSubmission PaymentSubmission? @relation(fields: [paymentSubmissionId], references: [id], onDelete: Restrict)
+  createdBy         User?              @relation("LedgerTransactionCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  reversalOf        LedgerTransaction? @relation("LedgerReversal", fields: [reversalOfId], references: [id], onDelete: Restrict)
+  reversedBy        LedgerTransaction? @relation("LedgerReversal")
+  entries           LedgerEntry[]
+
+  @@index([orderId])
+  @@index([originType, postedAt])
+  @@index([referenceType, referenceId])
+}
+
+enum LedgerEntryDirection {
+  DEBIT
+  CREDIT
+}
+
+model LedgerEntry {
+  id                  String               @id @default(uuid()) @db.Uuid
+  ledgerTransactionId String               @db.Uuid
+  ledgerAccountId     String               @db.Uuid
+  sequence            Int
+  direction           LedgerEntryDirection
+  amountCents         BigInt
+  createdAt           DateTime             @default(now()) @db.Timestamptz(3)
+
+  ledgerTransaction LedgerTransaction @relation(fields: [ledgerTransactionId], references: [id], onDelete: Restrict)
+  ledgerAccount     LedgerAccount     @relation(fields: [ledgerAccountId], references: [id], onDelete: Restrict)
+
+  @@unique([ledgerTransactionId, sequence])
+  @@index([ledgerAccountId, createdAt])
+}
+
+// -----------------------------------------------------------------------------
+// Fulfillment
+// -----------------------------------------------------------------------------
+
+enum FulfillmentStatus {
+  QUEUED
+  IN_PROGRESS
+  PROVISIONED
+  FAILED
+  CANCELLED
+}
+
+model Fulfillment {
+  id                     String              @id @default(uuid()) @db.Uuid
+  orderItemId            String              @unique @db.Uuid
+  strategy               FulfillmentStrategy
+  providerCode           String?             @db.VarChar(50)
+  status                 FulfillmentStatus   @default(QUEUED)
+  assignedToUserId       String?             @db.Uuid
+  idempotencyKey         String              @unique @db.VarChar(180)
+  providerReference      String?             @db.VarChar(255)
+  deliveryDataCiphertext String?             @db.Text
+  encryptionKeyVersion   String?             @db.VarChar(80)
+  clientVisibleMessage   String?             @db.Text
+  failureReason          String?             @db.Text
+  startedAt              DateTime?           @db.Timestamptz(3)
+  provisionedAt          DateTime?           @db.Timestamptz(3)
+  createdAt              DateTime            @default(now()) @db.Timestamptz(3)
+  updatedAt              DateTime            @updatedAt @db.Timestamptz(3)
+
+  orderItem  OrderItem            @relation(fields: [orderItemId], references: [id], onDelete: Restrict)
+  provider   FulfillmentProvider? @relation(fields: [providerCode], references: [code], onUpdate: Cascade, onDelete: SetNull)
+  assignedTo User?                @relation("FulfillmentAssignee", fields: [assignedToUserId], references: [id], onDelete: SetNull)
+  attempts   FulfillmentAttempt[]
+
+  @@index([status, createdAt])
+  @@index([assignedToUserId, status])
+  @@index([providerCode, providerReference])
+}
+
+enum FulfillmentAttemptTrigger {
+  MANUAL
+  API_REQUEST
+  WEBHOOK
+  RETRY
+}
+
+enum FulfillmentAttemptStatus {
+  STARTED
+  SUCCEEDED
+  FAILED
+}
+
+model FulfillmentAttempt {
+  id                String                    @id @default(uuid()) @db.Uuid
+  fulfillmentId     String                    @db.Uuid
+  attemptNumber     Int
+  trigger           FulfillmentAttemptTrigger
+  status            FulfillmentAttemptStatus  @default(STARTED)
+  actorUserId       String?                   @db.Uuid
+  externalRequestId String?                   @db.VarChar(255)
+  requestMetadata   Json?
+  responseMetadata  Json?
+  errorCode         String?                   @db.VarChar(120)
+  errorMessage      String?                   @db.Text
+  startedAt         DateTime                  @default(now()) @db.Timestamptz(3)
+  completedAt       DateTime?                 @db.Timestamptz(3)
+
+  fulfillment Fulfillment @relation(fields: [fulfillmentId], references: [id], onDelete: Restrict)
+  actor       User?       @relation("FulfillmentAttemptActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@unique([fulfillmentId, attemptNumber])
+  @@index([externalRequestId])
+  @@index([status, startedAt])
+}
+
+// -----------------------------------------------------------------------------
+// Governance and audit
+// -----------------------------------------------------------------------------
+
+model AuditLog {
+  id             String   @id @default(uuid()) @db.Uuid
+  actorUserId    String?  @db.Uuid
+  action         String   @db.VarChar(120)
+  entityType     String   @db.VarChar(80)
+  entityId       String   @db.VarChar(180)
+  beforeSnapshot Json?
+  afterSnapshot  Json?
+  ipAddress      String?  @db.Inet
+  userAgent      String?  @db.Text
+  correlationId  String?  @db.VarChar(120)
+  createdAt      DateTime @default(now()) @db.Timestamptz(3)
+
+  actor User? @relation("AuditActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([entityType, entityId, createdAt])
+  @@index([actorUserId, createdAt])
+  @@index([correlationId])
+}
